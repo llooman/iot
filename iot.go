@@ -16,12 +16,15 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"net/url"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strconv"
 	"strings"
 	"time"
+
+	mqtt "github.com/eclipse/paho.mqtt.golang"
 )
 
 type TimeDataRequest struct {
@@ -177,6 +180,69 @@ func main() {
 	fmt.Printf("payload:%s\niotPayload:%+v\n\n", payload, iotPayload)
 
 }
+
+// NewMQClient ...
+func NewMQClient(connection string, clientID string) mqtt.Client {
+
+	var mqttClient mqtt.Client
+
+	mqttURI, err := url.Parse(connection)
+	if err != nil {
+		fmt.Printf("mqtt parse err:%s [%s]", err.Error(), connection)
+		return mqttClient
+	}
+
+	opts := mqtt.NewClientOptions()
+	opts.AddBroker(mqttURI.String())
+	opts.SetKeepAlive(time.Second * time.Duration(60))
+	if clientID != "" {
+		opts.SetClientID(clientID) // Multiple connections should use different clientID for each connection, or just leave it blank
+	}
+
+	// If lost connection, reconnect again
+	opts.SetConnectionLostHandler(func(client mqtt.Client, e error) {
+		//	logger.Warn(fmt.Sprintf("mqtt conntion lost: %v", e))
+		fmt.Sprintf("mqtt reconnect ?? : %v\n", e)
+	})
+
+	mqttClient = mqtt.NewClient(opts) // connect to broker
+
+	token := mqttClient.Connect()
+	if token.Wait() && token.Error() != nil {
+		fmt.Sprintf("mqtt connect failed: %v\n", token.Error())
+		// logger.Fatalf("Fail to connect broker, %v",token.Error())
+	}
+
+	return mqttClient
+
+}
+
+// token := mqttClient.Publish(topic, byte(0), false, payload)
+
+// client := mqConnect("iotCmd", uri)
+// client.Subscribe(topic, 0, func(client mqtt.Client, msg mqtt.Message) {
+
+// func mqConnect(clientId string, uri *url.URL) mqtt.Client {
+// 	opts := createClientOptions(clientId, uri)
+// 	client := mqtt.NewClient(opts)
+// 	token := client.Connect()
+// 	for !token.WaitTimeout(3 * time.Second) {
+// 	}
+// 	if err := token.Error(); err != nil {
+// 		log.Fatal(err)
+// 	}
+// 	return client
+// }
+
+// func createClientOptions(clientId string, uri *url.URL) *mqtt.ClientOptions {
+// 	opts := mqtt.NewClientOptions()
+// 	opts.AddBroker(fmt.Sprintf("tcp://%s", uri.Host))
+// 	opts.SetUsername(uri.User.Username())
+// 	password, _ := uri.User.Password()
+// 	opts.SetPassword(password)
+// 	opts.SetClientID(clientId)
+// 	return opts
+// }
 
 // Send ...
 func Send(conn *IotConn, request string) (string, error) {
