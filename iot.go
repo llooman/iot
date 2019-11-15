@@ -194,6 +194,7 @@ func NewMQClient(connection string, clientID string) mqtt.Client {
 
 	opts := mqtt.NewClientOptions()
 	opts.AddBroker(mqttURI.String())
+	opts.AutoReconnect = true
 	opts.SetKeepAlive(time.Second * time.Duration(60))
 	if clientID != "" {
 		opts.SetClientID(clientID) // Multiple connections should use different clientID for each connection, or just leave it blank
@@ -698,5 +699,180 @@ func SqlInt64(localVar *int64, column sql.NullInt64) {
 func SqlString(localVar *string, column sql.NullString) {
 	if column.Valid {
 		*localVar = column.String
+	}
+}
+
+// NewEchoService ...
+func NewEchoService(port string) error {
+
+	var err error
+	var tcpAddr *net.TCPAddr
+
+	service := ":" + port
+
+	tcpAddr, err = net.ResolveTCPAddr("tcp", service)
+	if err != nil {
+		return err
+	}
+
+	tcpListener, errr := net.ListenTCP("tcp", tcpAddr)
+	if errr != nil {
+		return errr
+	}
+
+	fmt.Printf("NewEchoService: " + tcpAddr.IP.String() + "\r\n")
+
+	go echoListener(tcpListener)
+
+	return err
+}
+
+func echoListener(listener *net.TCPListener) {
+
+	for {
+		conn, err := listener.Accept()
+		if err != nil {
+			continue
+		}
+
+		// multi threading:
+		go echoHandler(conn)
+	}
+}
+
+func echoHandler(conn net.Conn) {
+
+	//TODO prevent long request attack
+	//TODO check how 0x00 is being handled
+
+	fmt.Printf("handleEchoClient \r\n")
+
+	conn.SetReadDeadline(time.Now().Add(49 * time.Second))
+
+	defer conn.Close() // close connection before exit
+
+	var err error
+	var char byte
+
+	buff := make([]byte, 512)
+	pntr := 0
+	c := bufio.NewReader(conn)
+
+	for {
+		// read a single byte which contains the message length
+		char, err = c.ReadByte()
+
+		//fmt.Printf("ReadByte %x\n", buff )
+
+		if err != nil {
+			fmt.Println(err)
+			break
+		} else if char == 0x0d || char == 0x0a || pntr >= 64 {
+
+			buff[pntr] = 0x00
+
+			if pntr > 0 {
+				buff[pntr] = 0x0d
+				pntr++
+				buff[pntr] = 0x00
+				conn.Write(buff[0:pntr])
+			}
+
+			pntr = 0
+		} else {
+			buff[pntr] = char
+			pntr++
+		}
+
+		if err != nil {
+			fmt.Println(err)
+			break
+		}
+	}
+}
+
+//  TODO NewForwardService ------------------------------------
+func startForwardService(port string, target net.Conn) error {
+
+	forwardListener, err := net.Listen("tcp", fmt.Sprintf(":%s", port))
+	if err != nil {
+		return err
+	}
+
+	fmt.Printf("forwardListener :" + port + "\r")
+
+	go serviceForwardListener(forwardListener, target)
+
+	return err
+}
+
+func serviceForwardListener(listener net.Listener, target net.Conn) {
+
+	for {
+		conn, err := listener.Accept()
+		if err != nil {
+			continue
+		}
+
+		// multi threading:
+		go handleForwardClient(conn, target)
+	}
+}
+
+func handleForwardClient(conn net.Conn, target net.Conn) {
+
+	fmt.Printf("handleForwardClient\r")
+
+	go forward("fwdUp", conn, target)
+
+	go forward("fwdDown", target, conn)
+}
+
+func forward(id string, source net.Conn, target net.Conn) {
+
+	var char byte
+	var err error
+
+	defer source.Close() // close connection before exit
+
+	c := bufio.NewReader(source)
+	t := bufio.NewWriter(target)
+
+	timeoutDuration := 3 * time.Second
+
+	for {
+
+		//source.SetReadDeadline(time.Now().Add(timeoutDuration))
+		char, err = c.ReadByte()
+
+		if err == nil {
+
+			//fmt.Printf("%s < %x-%c\r", id, char, char )
+
+			err = t.WriteByte(char)
+
+			if err != nil {
+				fmt.Printf("forward write err %s\n", err.Error())
+				return
+			}
+
+			if char == 0x0d || char == 0x0a || c.Buffered() >= c.Size() {
+
+				if c.Buffered() >= c.Size() {
+					fmt.Printf("%s flush %d\n", id, t.Buffered())
+				}
+
+				target.SetWriteDeadline(time.Now().Add(timeoutDuration))
+				t.Flush()
+
+				// calc new deadline
+
+			}
+
+		} else {
+
+			fmt.Printf("forward read err %s\n", err.Error())
+			return
+		}
 	}
 }
