@@ -146,8 +146,11 @@ func main() {
 
 	// fmt.Printf("Config %s\n", Config())
 
-	payload := "setVal,4,52,30"
+	payload := `{"Cmd":"timedataDiff","VarId":311,"Start":1573945200,"Stop":1574031600}`
 	iotPayload := ToPayload(payload)
+
+	// payload := "setVal,4,52,30"
+	// iotPayload := ToPayload(payload)
 
 	// payload := "{ota,4}"
 	// iotPayload := ToPayload(payload)
@@ -347,75 +350,88 @@ func timedata(iotPayload *IotPayload) {
 		return
 	}
 
-	iotPayload.VarId, _ = strconv.Atoi(iotPayload.Parms[1])
-	iotPayload.PropId = iotPayload.VarId % IDFactor
-	iotPayload.NodeId = iotPayload.VarId / IDFactor
+	if iotPayload.IsJson {
 
-	if len(iotPayload.Parms) == 2 { // from start of day until now
-
-		now := time.Now()
-		iotPayload.Stop = now.Unix()
-		iotPayload.Start = iotPayload.Stop - int64((now.Second() + now.Minute()*60 + now.Hour()*3600)) // start of the day
-
-	}
-	if len(iotPayload.Parms) == 3 { // stop missing so take 1 day =  86400 seconds
-		iotPayload.VarId, _ = strconv.Atoi(iotPayload.Parms[1])
-		parm3, _ := strconv.Atoi(iotPayload.Parms[2])
-		now := time.Now()
-
-		fmt.Printf("timedata.parm3:%d\n", parm3)
-
-		if parm3 > 100000 {
-			iotPayload.Start = int64(parm3)
-			iotPayload.Stop = iotPayload.Start + 86400
-			iotPayload.Length = 86400
-
-			// } else if start == 0 {
-			// 	req.Start  = int64(start)
-			// 	req.Stop = req.Start + int64(stop)
-
-		} else { // use start of the day until end of the day
-			// dayStart := now.Unix() -  int64((now.Second()+now.Minute()*60+now.Hour()*3600))
-			iotPayload.Start = now.Unix() + int64(parm3)
-			iotPayload.Stop = iotPayload.Start + 86400
-			iotPayload.Length = 86400
+		if iotPayload.VarId > 0 {
+			iotPayload.PropId = iotPayload.VarId % IDFactor
+			iotPayload.NodeId = iotPayload.VarId / IDFactor
+		} else {
+			iotPayload.VarId = iotPayload.NodeId*IDFactor + iotPayload.PropId
 		}
-	}
-	if len(iotPayload.Parms) == 4 {
 
+	} else {
 		iotPayload.VarId, _ = strconv.Atoi(iotPayload.Parms[1])
+		iotPayload.PropId = iotPayload.VarId % IDFactor
+		iotPayload.NodeId = iotPayload.VarId / IDFactor
 
-		parm3, _ := strconv.Atoi(iotPayload.Parms[2])
-		parm4, _ := strconv.Atoi(iotPayload.Parms[3])
-		now := time.Now()
+		if len(iotPayload.Parms) == 2 { // from start of day until now
 
-		if parm3 > 100000 && parm4 > 100000 {
-			iotPayload.Start = int64(parm3)
-			iotPayload.Stop = int64(parm4)
+			now := time.Now()
+			iotPayload.Stop = now.Unix()
+			iotPayload.Start = iotPayload.Stop - int64((now.Second() + now.Minute()*60 + now.Hour()*3600)) // start of the day
 
-		} else if parm3 > 100000 && parm4 < 100000 {
-			iotPayload.Start = int64(parm3)
-			iotPayload.Stop = iotPayload.Start + int64(parm4)
-			iotPayload.Length = parm4 //86400
+		}
 
-		} else if parm3 == 0 && parm4 > 100000 {
-			iotPayload.Start = now.Unix() - int64((now.Second() + now.Minute()*60 + now.Hour()*3600)) // start of the day
-			iotPayload.Stop = int64(parm4)
+		if len(iotPayload.Parms) == 3 { // stop missing so take 1 day =  86400 seconds
+			iotPayload.VarId, _ = strconv.Atoi(iotPayload.Parms[1])
+			parm3, _ := strconv.Atoi(iotPayload.Parms[2])
+			now := time.Now()
 
-		} else if parm3 < 100000 && parm4 > 100000 {
-			iotPayload.Start = now.Unix() + int64(parm3)
-			iotPayload.Stop = int64(parm4)
+			fmt.Printf("timedata.parm3:%d\n", parm3)
 
-		} else if parm3 == 0 && parm4 < 100000 {
-			iotPayload.Start = now.Unix() - int64((now.Second() + now.Minute()*60 + now.Hour()*3600)) // start of the day
-			iotPayload.Stop = iotPayload.Start + int64(parm4)
-			iotPayload.Length = parm4 //86400
+			if parm3 > 100000 {
+				iotPayload.Start = int64(parm3)
+				iotPayload.Stop = iotPayload.Start + 86400
+				iotPayload.Length = 86400
 
-		} else if parm3 < 100000 && parm4 < 100000 {
+				// } else if start == 0 {
+				// 	req.Start  = int64(start)
+				// 	req.Stop = req.Start + int64(stop)
 
-			iotPayload.Start = now.Unix() + int64(parm3)
-			iotPayload.Stop = iotPayload.Start + int64(parm4)
-			iotPayload.Length = parm4 //86400
+			} else { // use start of the day until end of the day
+				// dayStart := now.Unix() -  int64((now.Second()+now.Minute()*60+now.Hour()*3600))
+				iotPayload.Start = now.Unix() + int64(parm3)
+				iotPayload.Stop = iotPayload.Start + 86400
+				iotPayload.Length = 86400
+			}
+		}
+
+		if len(iotPayload.Parms) == 4 {
+
+			iotPayload.VarId, _ = strconv.Atoi(iotPayload.Parms[1])
+
+			parm3, _ := strconv.Atoi(iotPayload.Parms[2])
+			parm4, _ := strconv.Atoi(iotPayload.Parms[3])
+			now := time.Now()
+
+			if parm3 > 100000 && parm4 > 100000 {
+				iotPayload.Start = int64(parm3)
+				iotPayload.Stop = int64(parm4)
+
+			} else if parm3 > 100000 && parm4 < 100000 {
+				iotPayload.Start = int64(parm3)
+				iotPayload.Stop = iotPayload.Start + int64(parm4)
+				iotPayload.Length = parm4 //86400
+
+			} else if parm3 == 0 && parm4 > 100000 {
+				iotPayload.Start = now.Unix() - int64((now.Second() + now.Minute()*60 + now.Hour()*3600)) // start of the day
+				iotPayload.Stop = int64(parm4)
+
+			} else if parm3 < 100000 && parm4 > 100000 {
+				iotPayload.Start = now.Unix() + int64(parm3)
+				iotPayload.Stop = int64(parm4)
+
+			} else if parm3 == 0 && parm4 < 100000 {
+				iotPayload.Start = now.Unix() - int64((now.Second() + now.Minute()*60 + now.Hour()*3600)) // start of the day
+				iotPayload.Stop = iotPayload.Start + int64(parm4)
+				iotPayload.Length = parm4 //86400
+
+			} else if parm3 < 100000 && parm4 < 100000 {
+
+				iotPayload.Start = now.Unix() + int64(parm3)
+				iotPayload.Stop = iotPayload.Start + int64(parm4)
+				iotPayload.Length = parm4 //86400
+			}
 		}
 	}
 
@@ -428,20 +444,19 @@ func timedata(iotPayload *IotPayload) {
 func ToPayload(payload string) IotPayload {
 
 	var myPayload IotPayload
+	isJson := false
 
 	if strings.Contains(payload, ":") {
 		// deal with json comming in
-		var req TimeDataRequest
+		// var req TimeDataRequest
 
-		errrr := json.Unmarshal([]byte(payload), &req)
+		errrr := json.Unmarshal([]byte(payload), &myPayload)
 
 		if errrr != nil {
 			fmt.Println("ToIotPayload json err:", errrr.Error())
 			return myPayload
 		}
-
-		myPayload.Cmd = req.Cmd
-		myPayload.IsJson = true
+		isJson = true
 
 	} else if strings.Contains(payload, "{") {
 
@@ -470,18 +485,22 @@ func ToPayload(payload string) IotPayload {
 	} else if strings.Contains(payload, ";") {
 		parms = strings.Split(payload, ";")
 	} else {
-		fmt.Printf("Err iotSvc: %s \n", payload)
+		parms = strings.Split(payload, "`")
+		// parms[0] = payload
+		// fmt.Printf("Err iotSvc: %s \n", payload)
 	}
 
 	myPayload.Parms = parms
 	// fmt.Printf("ToIotPayload.parms:%q len:%d\n", parms, len(parms))
 
-	if len(parms) < 1 {
-		myPayload.Cmd = payload
+	if isJson {
+		myPayload.IsJson = true
 
-	} else {
+	} else if len(parms) > 1 {
 		myPayload.Cmd = parms[0]
 
+	} else {
+		myPayload.Cmd = payload
 	}
 
 	// 	if(   Character.isDigit(cmd.charAt(0))
