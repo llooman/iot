@@ -139,7 +139,7 @@ var IDFactor int
 
 func init() {
 
-	IDFactor = 1000
+	IDFactor = 100
 }
 
 func main() {
