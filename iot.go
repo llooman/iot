@@ -5,7 +5,6 @@ package iot
 /*
 go get -u all
 go get -u github.com/godoctor/godoctor
-
 go get github.com/tkanos/gonfig
 */
 
