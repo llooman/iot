@@ -1,4 +1,4 @@
-// package main
+//package main
 
 package iot
 
@@ -10,10 +10,13 @@ go get github.com/tkanos/gonfig
 
 import (
 	"bufio"
+	"bytes"
 	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"log"
 	"net"
 	"net/url"
 	"os"
@@ -26,22 +29,15 @@ import (
 	mqtt "github.com/eclipse/paho.mqtt.golang"
 )
 
-type TimeDataRequest struct {
-	Cmd    string
-	Id     int64
-	Start  int64
-	Stop   int64
-	Length int64
-}
-
 type IotPayload struct {
 	Cmd       string
 	Parms     []string
+	Id        string
 	NodeId    int
 	PropId    int
 	VarId     int
 	ConnId    int
-	Val       int64
+	Val       string //int64
 	Timestamp int64
 	Start     int64
 	Stop      int64
@@ -50,45 +46,36 @@ type IotPayload struct {
 	IsJson    bool
 }
 
-type CmdRequest struct {
-	Cmd   string
-	Parms []string
-}
-
-type IotMsg struct {
-	Cmd       string
-	NodeId    int
-	PropId    int
-	VarId     int
-	ConnId    int
-	Val       int
-	Timestamp int
-}
-
 type IotNode struct {
-	NodeId    int
-	ConnId    int
-	Name      string
-	DefDirty  bool
-	Dirty     bool
-	FreeMem   int
-	BootCount int
-	BootStamp int64
-	Timestamp int64
+	NodeId      int
+	ConnId      int
+	Name        string
+	NodeType    int
+	FreeMem     int
+	BootCount   int
+	BootStamp   int64
+	Timestamp   int64
+	IsInit      bool
+	IsDefSaved  bool
+	IsDataSaved bool
+	IsOffline   bool
+	Props       map[int]*IotProp
 }
 
 // IotProp ...
 type IotProp struct {
 	Name   string
-	VarId  int
 	NodeId int
 	PropId int
 	Node   *IotNode
 
-	FromDb   bool
-	DefDirty bool
-	MemDirty bool
-	IsNew    bool
+	// FromDb      bool
+	IsInit      bool
+	IsDefSaved  bool
+	IsDataSaved bool
+	IsStr       bool
+	OnRead      bool
+	OnSave      bool
 
 	Decimals    int    // & 0,1,2,3, <0=string
 	LogOption   int    // & (logMem) 0=none, 1=skip equals, 2=replace extrapolated values
@@ -104,7 +91,7 @@ type IotProp struct {
 	PrevStamp int64 // &
 	// Soll           	int
 	// SollTimeStamp  	int64
-	Err      int64 // &
+	Err      string // &
 	ErrStamp int64
 	InErr    bool // -
 
@@ -116,11 +103,52 @@ type IotProp struct {
 	RefreshRate int
 	RetryCount  int
 	NextRefresh int64
-
-	// Modified int64 // timestamp
-	// PropType int   // parm, iotVal, log
-	// Valid    int
 }
+
+var Nodes map[int]*IotNode
+
+var MqttClient3 mqtt.Client
+var MqttClient3b mqtt.Client
+var MqttDown string
+
+var SvcNode *IotNode
+
+var Pomp *IotNode
+var Dimmer *IotNode
+var Ketel *IotNode
+var P1 *IotNode
+var CloseIn *IotNode
+var Serial1 *IotNode
+var Serial2 *IotNode
+var Chint *IotNode
+var Test *IotNode
+var Afzuiging *IotNode
+
+var Sonoff *IotNode
+var Sonoff2 *IotNode
+
+var Neo31 *IotNode
+var Kerstboom *IotProp
+
+var Son32 *IotNode
+var Son32Knop *IotProp
+
+var KamerTemp *IotProp
+var KetelSchakelaar *IotProp
+var PompTemp *IotProp
+
+var Switch *IotProp
+
+var LogLevel *IotProp
+
+// for sync LogLevel to Connector
+var ConnNode *IotNode
+
+// var ConnLogLevel *IotProp
+
+var TimerMode *IotProp
+
+var DatabaseNew *sql.DB
 
 // IotConn ...
 type IotConn struct {
@@ -134,30 +162,34 @@ type IotConn struct {
 	Connected      bool
 }
 
-var IDFactor int
+// var IDFactor int
+
+var (
+	Detail *log.Logger
+	Trace  *log.Logger
+	Info   *log.Logger
+	Warn   *log.Logger
+	Err    *log.Logger
+)
+
+var propToLog int
+var nodeToLog int
+var codeToLog string
+var LogDebug bool
 
 func init() {
-
-	IDFactor = 100
+	Nodes = make(map[int]*IotNode)
+	MqttDown = "??"
 }
 
 func main() {
 
 	// fmt.Printf("Config %s\n", Config())
 
+	log.Printf("iot.main")
+
 	payload := `{"Cmd":"timedataDiff","VarId":311,"Start":1573945200,"Stop":1574031600}`
 	iotPayload := ToPayload(payload)
-
-	// payload := "setVal,4,52,30"
-	// iotPayload := ToPayload(payload)
-
-	// payload := "{ota,4}"
-	// iotPayload := ToPayload(payload)
-
-	// fmt.Printf("payload:%s\niotPayload:%+v\n\n", payload, iotPayload)
-
-	// payload := "mvcdata&node&3"
-	// iotPayload := ToPayload(payload)
 
 	// fmt.Printf("payload:%s\niotPayload:%+v\n\n", payload, iotPayload)
 
@@ -183,6 +215,96 @@ func main() {
 
 }
 
+// LogInfo ...
+func LogInfo() {
+	Info.Printf("codeToLog:%s nodeToLog:%d propToLog:%d\n", codeToLog, nodeToLog, propToLog)
+}
+
+// LogProp ...
+func LogProp(prop *IotProp) bool {
+
+	if LogNode(prop.Node) &&
+		(propToLog == 0 || prop.PropId == propToLog) {
+
+		return true
+	}
+	return false
+}
+
+// LogPayload ...
+func LogPayload(payload *IotPayload) bool {
+
+	if codeToLog == "s" ||
+		((payload.PropId == propToLog || propToLog == 0) &&
+			(payload.NodeId == nodeToLog || nodeToLog == 0) &&
+			(propToLog != 0 || nodeToLog != 0)) {
+
+		return true
+
+	} else {
+		return false
+	}
+}
+
+// LogNode ...
+func LogNode(node *IotNode) bool {
+
+	if node.NodeId == nodeToLog && nodeToLog != 0 {
+		return true
+	}
+	return false
+}
+
+// LogCode ...
+func LogCode(code string) bool {
+
+	if code == codeToLog {
+		return true
+	}
+	return false
+}
+
+// MvcUp  put on UpQueue {"mvcup":{"nx_py" || "py":[v,recent]}}
+func MvcUp(prop *IotProp) {
+
+	var buff bytes.Buffer
+
+	if prop.GlobalMvc {
+		topic := fmt.Sprintf(`node/%d/global`, prop.NodeId)
+		PropMvc(&buff, prop, true)
+		payload := fmt.Sprintf(`{"mvcup":{%s}}`, buff.String())
+
+		if LogProp(prop) {
+			Trace.Printf("mvcUp %s [%s]", payload, topic)
+		}
+
+		token := MqttClient3b.Publish(topic, byte(0), false, payload)
+		if token.Wait() && token.Error() != nil {
+			Err.Printf("error %s [%s]\n", payload, topic)
+			Err.Printf("Fail to publish, %v", token.Error())
+		}
+	}
+
+	if prop.GlobalMvc ||
+		prop.LocalMvc {
+
+		topic := fmt.Sprintf(`node/%d/local`, prop.NodeId)
+		buff.Reset()
+		PropMvc(&buff, prop, false)
+		payload := fmt.Sprintf(`{"mvcup":{%s}}`, buff.String())
+
+		if LogProp(prop) {
+			Trace.Printf("mvcUp %s [%s]\n", payload, topic)
+		}
+
+		token := MqttClient3b.Publish(topic, byte(0), false, payload)
+		if token.Wait() && token.Error() != nil {
+			Err.Printf("error %s [%s]", payload, topic)
+			Err.Printf("Fail to publish, %v", token.Error())
+		}
+	}
+}
+
 // NewMQClient ...
 func NewMQClient(connection string, clientID string) mqtt.Client {
 
@@ -190,7 +312,7 @@ func NewMQClient(connection string, clientID string) mqtt.Client {
 
 	mqttURI, err := url.Parse(connection)
 	if err != nil {
-		fmt.Printf("mqtt parse err:%s [%s]", err.Error(), connection)
+		Err.Printf("mqtt parse err:%s [%s]", err.Error(), connection)
 		return mqttClient
 	}
 
@@ -204,7 +326,7 @@ func NewMQClient(connection string, clientID string) mqtt.Client {
 
 	// If lost connection, reconnect again
 	opts.SetConnectionLostHandler(func(client mqtt.Client, e error) {
-		//	logger.Warn(fmt.Sprintf("mqtt conntion lost: %v", e))
+		//	logger.Warn(Err.Sprintf("mqtt conntion lost: %v", e))
 		fmt.Sprintf("mqtt reconnect ?? : %v\n", e)
 	})
 
@@ -265,7 +387,7 @@ func Send(conn *IotConn, request string) (string, error) {
 
 		} else {
 			if !conn.Silent {
-				fmt.Printf("Error: %s\n", err.Error())
+				Err.Printf("Error: %s\n", err.Error())
 			}
 			return "connErr", err
 		}
@@ -342,120 +464,82 @@ func Config() string {
 
 func timedata(iotPayload *IotPayload) {
 
-	// fmt.Printf("timedata:%+v", iotPayload)
+	//fmt.Printf("iot.timedata:%v\n", iotPayload)
 
-	if len(iotPayload.Parms) < 2 {
+	if len(iotPayload.Parms) < 2 &&
+		iotPayload.Id == "" {
 		iotPayload.Error = fmt.Sprintf(`{"retcode":99,"message":"%s: id missing"}`, iotPayload.Cmd)
 		return
 	}
 
-	if iotPayload.IsJson {
+	if iotPayload.Start == 0 &&
+		iotPayload.Stop == 0 {
 
-		if iotPayload.VarId > 0 {
-			iotPayload.PropId = iotPayload.VarId % IDFactor
-			iotPayload.NodeId = iotPayload.VarId / IDFactor
+		// from start of day until now
+		now := time.Now()
+		iotPayload.Stop = time.Now().Unix()
+		iotPayload.Start = iotPayload.Stop - int64((now.Second() + now.Minute()*60 + now.Hour()*3600)) // start of the day
+
+	} else if iotPayload.Stop == 0 {
+
+		// stop missing so take 1 day =  86400 seconds
+
+		if iotPayload.Start > 100000 {
+			iotPayload.Stop = iotPayload.Start + 86400
+			iotPayload.Length = 86400
+
 		} else {
-			iotPayload.VarId = iotPayload.NodeId*IDFactor + iotPayload.PropId
+			// use start of the day until end of the day
+			iotPayload.Start = time.Now().Unix() + iotPayload.Start
+			iotPayload.Stop = iotPayload.Start + 86400
+			iotPayload.Length = 86400
 		}
 
 	} else {
-		iotPayload.VarId, _ = strconv.Atoi(iotPayload.Parms[1])
-		iotPayload.PropId = iotPayload.VarId % IDFactor
-		iotPayload.NodeId = iotPayload.VarId / IDFactor
 
-		if len(iotPayload.Parms) == 2 { // from start of day until now
+		if iotPayload.Start > 100000 && iotPayload.Stop < 100000 {
 
-			now := time.Now()
-			iotPayload.Stop = now.Unix()
-			iotPayload.Start = iotPayload.Stop - int64((now.Second() + now.Minute()*60 + now.Hour()*3600)) // start of the day
+			iotPayload.Stop = iotPayload.Start + iotPayload.Stop
+			iotPayload.Length = int(iotPayload.Stop)
 
-		}
+		} else if iotPayload.Start == 0 && iotPayload.Stop > 100000 {
+			iotPayload.Start = time.Now().Unix() - int64((time.Now().Second() + time.Now().Minute()*60 + time.Now().Hour()*3600)) // start of the day
 
-		if len(iotPayload.Parms) == 3 { // stop missing so take 1 day =  86400 seconds
-			iotPayload.VarId, _ = strconv.Atoi(iotPayload.Parms[1])
-			parm3, _ := strconv.Atoi(iotPayload.Parms[2])
-			now := time.Now()
+		} else if iotPayload.Start < 100000 && iotPayload.Stop > 100000 {
+			iotPayload.Start = time.Now().Unix() + iotPayload.Start
 
-			fmt.Printf("timedata.parm3:%d\n", parm3)
+		} else if iotPayload.Start == 0 && iotPayload.Stop < 100000 {
 
-			if parm3 > 100000 {
-				iotPayload.Start = int64(parm3)
-				iotPayload.Stop = iotPayload.Start + 86400
-				iotPayload.Length = 86400
+			iotPayload.Start = time.Now().Unix() - int64((time.Now().Second() + time.Now().Minute()*60 + time.Now().Hour()*3600)) // start of the day
+			iotPayload.Stop = iotPayload.Start + iotPayload.Stop
+			iotPayload.Length = int(iotPayload.Stop)
 
-				// } else if start == 0 {
-				// 	req.Start  = int64(start)
-				// 	req.Stop = req.Start + int64(stop)
+		} else if iotPayload.Start < 100000 && iotPayload.Stop < 100000 {
 
-			} else { // use start of the day until end of the day
-				// dayStart := now.Unix() -  int64((now.Second()+now.Minute()*60+now.Hour()*3600))
-				iotPayload.Start = now.Unix() + int64(parm3)
-				iotPayload.Stop = iotPayload.Start + 86400
-				iotPayload.Length = 86400
-			}
-		}
-
-		if len(iotPayload.Parms) == 4 {
-
-			iotPayload.VarId, _ = strconv.Atoi(iotPayload.Parms[1])
-
-			parm3, _ := strconv.Atoi(iotPayload.Parms[2])
-			parm4, _ := strconv.Atoi(iotPayload.Parms[3])
-			now := time.Now()
-
-			if parm3 > 100000 && parm4 > 100000 {
-				iotPayload.Start = int64(parm3)
-				iotPayload.Stop = int64(parm4)
-
-			} else if parm3 > 100000 && parm4 < 100000 {
-				iotPayload.Start = int64(parm3)
-				iotPayload.Stop = iotPayload.Start + int64(parm4)
-				iotPayload.Length = parm4 //86400
-
-			} else if parm3 == 0 && parm4 > 100000 {
-				iotPayload.Start = now.Unix() - int64((now.Second() + now.Minute()*60 + now.Hour()*3600)) // start of the day
-				iotPayload.Stop = int64(parm4)
-
-			} else if parm3 < 100000 && parm4 > 100000 {
-				iotPayload.Start = now.Unix() + int64(parm3)
-				iotPayload.Stop = int64(parm4)
-
-			} else if parm3 == 0 && parm4 < 100000 {
-				iotPayload.Start = now.Unix() - int64((now.Second() + now.Minute()*60 + now.Hour()*3600)) // start of the day
-				iotPayload.Stop = iotPayload.Start + int64(parm4)
-				iotPayload.Length = parm4 //86400
-
-			} else if parm3 < 100000 && parm4 < 100000 {
-
-				iotPayload.Start = now.Unix() + int64(parm3)
-				iotPayload.Stop = iotPayload.Start + int64(parm4)
-				iotPayload.Length = parm4 //86400
-			}
+			iotPayload.Start = time.Now().Unix() + iotPayload.Start
+			iotPayload.Stop = iotPayload.Start + iotPayload.Stop
+			iotPayload.Length = int(iotPayload.Stop)
 		}
 	}
-
-	// return ""
-	//	fmt.Printf(`timedata: {"id":%d,"start":%d,"stop":%d }\n\n`, req.Id, req.Start , req.Stop )
-
 }
 
 // ToPayload ...
 func ToPayload(payload string) IotPayload {
 
 	var myPayload IotPayload
-	isJson := false
 
 	if strings.Contains(payload, ":") {
-		// deal with json comming in
-		// var req TimeDataRequest
 
+		/*
+		 * deal with json comming in
+		 */
 		errrr := json.Unmarshal([]byte(payload), &myPayload)
 
 		if errrr != nil {
-			fmt.Println("ToIotPayload json err:", errrr.Error())
+			Err.Println("ToPayload json err:", errrr.Error())
 			return myPayload
 		}
-		isJson = true
+		myPayload.IsJson = true
 
 	} else if strings.Contains(payload, "{") {
 
@@ -475,58 +559,48 @@ func ToPayload(payload string) IotPayload {
 
 	var parms []string
 
-	if strings.Contains(payload, " ") {
-		parms = strings.Split(payload, " ")
-	} else if strings.Contains(payload, ",") {
-		parms = strings.Split(payload, ",")
-	} else if strings.Contains(payload, "&") {
-		parms = strings.Split(payload, "&")
-	} else if strings.Contains(payload, ";") {
-		parms = strings.Split(payload, ";")
-	} else {
-		parms = strings.Split(payload, "`")
-		// parms[0] = payload
-		// fmt.Printf("Err iotSvc: %s \n", payload)
+	if !myPayload.IsJson {
+
+		if strings.Contains(payload, " ") {
+			parms = strings.Split(payload, " ")
+		} else if strings.Contains(payload, ",") {
+			parms = strings.Split(payload, ",")
+		} else if strings.Contains(payload, "&") {
+			parms = strings.Split(payload, "&")
+		} else if strings.Contains(payload, ";") {
+			parms = strings.Split(payload, ";")
+		} else {
+			// parms = [1]string
+			// parms[0] = payload
+			// parms[0] = payload
+			// fmt.Printf("Err iotSvc: %s \n", payload)
+		}
+
+		if len(parms) > 1 {
+			myPayload.Cmd = parms[0]
+		} else {
+			myPayload.Cmd = payload
+		}
 	}
 
 	myPayload.Parms = parms
-	// fmt.Printf("ToIotPayload.parms:%q len:%d\n", parms, len(parms))
+	//fmt.Printf("ToPayload.parms:%q len:%d\n", parms, len(parms))
 
-	if isJson {
-		myPayload.IsJson = true
+	if len(parms) > 1 &&
+		parms[1][0:1] == "n" {
+		myPayload.Id = parms[1]
 
-	} else if len(parms) > 1 {
-		myPayload.Cmd = parms[0]
-
-	} else {
-		myPayload.Cmd = payload
 	}
 
-	// 	if(   Character.isDigit(cmd.charAt(0))
-	// 	||	( Character.isDigit(cmd.charAt(1)) && cmd.charAt(0) == 'n' )
-	//  ){
-	// 		logger.info("domo.command: "+cmd+" "+parm1+" "+parm2+" "+parm3+" "+parm4);
-	// 	 if(cmd.charAt(0) == 'n') cmd = cmd.substring(1);
-	// 	 parm4 = parm3;
-	// 	 parm3 = parm2;
-	// 	 parm2 = parm1.replace("_", "");
-	// 	 parm1 = cmd;
-	// 	 cmd = "node";
-	// 	}
+	//fmt.Printf("ToPayload.cmd %v\n", myPayload)
 
-	// case "setVal":;
-	// if(parm1.indexOf("_")>0)
-	// {
-	// 	String parms[] = parm1.split("_") ;
-	// 	node = getNode(parms[0]);
-	// 	response = node.command(cmd, parms[1], parm2);
-	// }
-	// else
-	// {
-	// 	node = getNode(parm1);
-	// 	response = node.command(cmd, parm2, parm3);
-	// }
-	// break;
+	if myPayload.Id != "" {
+		startProp := strings.Index(myPayload.Id, "p")
+		if startProp > 1 {
+			myPayload.NodeId = aToI(myPayload.Id[1:startProp])
+			myPayload.PropId = aToI(myPayload.Id[startProp+1:])
+		}
+	}
 
 	switch myPayload.Cmd {
 
@@ -539,7 +613,8 @@ func ToPayload(payload string) IotPayload {
 			myPayload.ConnId = aToI(parms[2])
 		}
 		if len(parms) > 3 {
-			myPayload.Val = aToI64(parms[3])
+			// myPayload.Val = aToI64(parms[3])
+			myPayload.Val = parms[3]
 		}
 		if len(parms) > 4 {
 			myPayload.Timestamp = aToI64(parms[4])
@@ -561,7 +636,7 @@ func ToPayload(payload string) IotPayload {
 		// varId=IoTUtil.propKey(nodeId, sensorId);
 		// changed = true;
 
-	case "U", "E", "R", "S":
+	case "U", "E", "R", "S", "P", "O", "D":
 		if len(parms) > 1 {
 			myPayload.NodeId = aToI(parms[1])
 		}
@@ -572,15 +647,25 @@ func ToPayload(payload string) IotPayload {
 			myPayload.ConnId = aToI(parms[3])
 		}
 		if len(parms) > 4 {
-			myPayload.Val = aToI64(parms[4])
+			myPayload.Val = parms[4]
 		}
 		if len(parms) > 5 {
 			myPayload.Timestamp = aToI64(parms[5])
 		}
 
-		myPayload.VarId = myPayload.NodeId*IDFactor + myPayload.PropId
+		// myPayload.VarId = myPayload.NodeId*IDFactor + myPayload.PropId
 
-	case "setVal", "setProp":
+	case "set":
+		myPayload.Cmd = "S"
+
+		if len(parms) == 3 {
+			myPayload.Val = parms[2]
+
+		}
+
+		// myPayload.VarId = myPayload.NodeId*IDFactor + myPayload.PropId
+
+	case "setVal":
 		myPayload.Cmd = "S"
 		if len(parms) > 1 {
 			myPayload.NodeId = aToI(parms[1])
@@ -589,20 +674,18 @@ func ToPayload(payload string) IotPayload {
 			myPayload.PropId = aToI(parms[2])
 		}
 		if len(parms) > 3 {
-			myPayload.Val = aToI64(parms[3])
+			myPayload.Val = parms[3]
 		}
-		// if len(parms) > 4 {
-		// 	myPayload.Val = aToI64(parms[4])
-		// }
-		// if len(parms) > 5 {
-		// 	myPayload.Timestamp = aToI64(parms[5])
-		// }
 
-		myPayload.VarId = myPayload.NodeId*IDFactor + myPayload.PropId
+		// myPayload.VarId = myPayload.NodeId*IDFactor + myPayload.PropId
 
 	case "ota":
 		myPayload.Cmd = "O"
 		myPayload.NodeId = aToI(parms[1])
+
+	// case "P", "p", "R", "r", "O", "o":
+	// 	myPayload.Cmd = myPayload.Cmd
+	// 	myPayload.NodeId = aToI(parms[1])
 
 	case "sendN":
 		myPayload.Cmd = "N"
@@ -613,15 +696,54 @@ func ToPayload(payload string) IotPayload {
 		myPayload.NodeId = aToI(parms[1])
 
 	case "test":
-		myPayload.Cmd = "T"
-		myPayload.NodeId = aToI(parms[1])
+		if len(parms) > 1 {
+			myPayload.Cmd = "T"
+			myPayload.NodeId = aToI(parms[1])
+		}
 
 	case "rstBcount":
 		myPayload.Cmd = "b"
 		myPayload.NodeId = aToI(parms[1])
+
+	default:
+
+		if len(parms) == 0 &&
+			strings.Contains(payload, "/") &&
+			strings.HasPrefix(payload, "iot") {
+			myPayload.Cmd = "subscribe"
+			myPayload.Val = payload
+		}
+
+		if len(parms) == 2 {
+			myPayload.Val = parms[1]
+		}
+
+		if len(parms) == 3 {
+			i, err := strconv.Atoi(parms[1])
+			if err == nil {
+				myPayload.PropId = i
+				myPayload.Val = parms[2]
+			} else {
+
+			}
+		}
+		if len(parms) == 4 {
+			i, err := strconv.Atoi(parms[1])
+			if err == nil {
+				myPayload.NodeId = i
+				i, err = strconv.Atoi(parms[1])
+				if err == nil {
+					myPayload.PropId = i
+					myPayload.Val = parms[3]
+				}
+			}
+			// myPayload.NodeId = aToI(parms[1])
+			// myPayload.PropId = aToI(parms[2])
+		}
+
 	}
 
-	if myPayload.Cmd == "u" || myPayload.Cmd == "e" || myPayload.Cmd == "U" || myPayload.Cmd == "E" {
+	if myPayload.Cmd == "u" || myPayload.Cmd == "e" || myPayload.Cmd == "U" || myPayload.Cmd == "E" || myPayload.Cmd == "D" {
 
 		if myPayload.ConnId == 0 {
 			myPayload.ConnId = myPayload.NodeId
@@ -630,6 +752,16 @@ func ToPayload(payload string) IotPayload {
 	}
 
 	if strings.HasPrefix(myPayload.Cmd, "time") {
+
+		if len(parms) > 1 {
+			myPayload.Id = parms[1]
+		}
+		if len(parms) > 2 {
+			myPayload.Start = aToI64(parms[2])
+		}
+		if len(parms) > 3 {
+			myPayload.Stop = aToI64(parms[3])
+		}
 		timedata(&myPayload)
 
 	} else if myPayload.Cmd == "mvcdata" {
@@ -639,20 +771,23 @@ func ToPayload(payload string) IotPayload {
 
 	}
 
+	if myPayload.Cmd == "S" {
+		myPayload.Cmd = "set"
+	}
+
 	return myPayload
 }
 
 func aToI(a string) int {
 
+	//fmt.Printf("aToI:%s\n", a)
 	i, err := strconv.Atoi(a)
-	// i64, err := strconv.ParseInt(s, 10, 32)
 	checkError(err)
 	return i
 }
 
 func aToI64(a string) int64 {
-
-	// i, err := strconv.Atoi(a)
+	//fmt.Printf("aToI64:%s\n", a)
 	i64, err := strconv.ParseInt(a, 10, 32)
 	checkError(err)
 	return i64
@@ -660,25 +795,10 @@ func aToI64(a string) int64 {
 
 func checkError(err error) {
 	if err != nil {
-		fmt.Printf("err: " + err.Error())
+		Err.Printf("err: " + err.Error())
 		fmt.Fprintf(os.Stderr, "iot Fatal error: %s", err.Error())
 		os.Exit(1)
 	}
-}
-
-func nodeId(varID int) int {
-
-	if varID < IDFactor {
-		// fmt.Printf("Warn util.nodeId: %s util.nodeId:  Id "+varId+" <IDFactor!"\n", payload)
-		//logger.error("util.nodeId:  Id "+varId+" <IDFactor!");
-		return varID
-	}
-	return varID / IDFactor
-}
-
-func propId(varID int) int {
-
-	return varID % IDFactor
 }
 
 func FmtHHMM(d time.Duration) string {
@@ -699,6 +819,12 @@ func FmtMMSS(d time.Duration) string {
 func SqlFloat32(localVar *float32, column sql.NullFloat64) {
 	if column.Valid {
 		*localVar = float32(column.Float64)
+	}
+}
+
+func SqlBoolInt(localVar *bool, column sql.NullInt64) {
+	if column.Valid {
+		*localVar = column.Int64 > 0
 	}
 }
 
@@ -783,7 +909,7 @@ func echoHandler(conn net.Conn) {
 		//fmt.Printf("ReadByte %x\n", buff )
 
 		if err != nil {
-			fmt.Println(err)
+			Err.Println(err)
 			break
 		} else if char == 0x0d || char == 0x0a || pntr >= 64 {
 
@@ -803,7 +929,7 @@ func echoHandler(conn net.Conn) {
 		}
 
 		if err != nil {
-			fmt.Println(err)
+			Err.Println(err)
 			break
 		}
 	}
@@ -870,14 +996,14 @@ func forward(id string, source net.Conn, target net.Conn) {
 			err = t.WriteByte(char)
 
 			if err != nil {
-				fmt.Printf("forward write err %s\n", err.Error())
+				Err.Printf("forward write err %s\n", err.Error())
 				return
 			}
 
 			if char == 0x0d || char == 0x0a || c.Buffered() >= c.Size() {
 
 				if c.Buffered() >= c.Size() {
-					fmt.Printf("%s flush %d\n", id, t.Buffered())
+					Err.Printf("%s flush %d\n", id, t.Buffered())
 				}
 
 				target.SetWriteDeadline(time.Now().Add(timeoutDuration))
@@ -889,8 +1015,54 @@ func forward(id string, source net.Conn, target net.Conn) {
 
 		} else {
 
-			fmt.Printf("forward read err %s\n", err.Error())
+			Err.Printf("forward read err %s\n", err.Error())
 			return
 		}
 	}
 }
+
+func InitLogging(
+	traceHandle io.Writer,
+	infoHandle io.Writer,
+	warningHandle io.Writer,
+	errorHandle io.Writer) {
+
+	Detail = log.New(infoHandle,
+		"",
+		0)
+
+	Trace = log.New(traceHandle,
+		"_",
+		log.Ltime)
+
+	Info = log.New(infoHandle,
+		"",
+		log.Ltime)
+
+	Warn = log.New(warningHandle,
+		"w)",
+		log.Ldate|log.Ltime|log.Lshortfile)
+
+	Err = log.New(errorHandle,
+		"e)",
+		log.Ldate|log.Ltime|log.Lshortfile)
+
+}
+
+// func AppendByte(slice []byte, data ...byte) []byte {
+// 	m := len(slice)
+// 	n := m + len(data)
+// 	if n > cap(slice) { // if necessary, reallocate
+// 		// allocate double what's needed, for future growth.
+// 		newSlice := make([]byte, (n+1)*2)
+// 		copy(newSlice, slice)
+// 		slice = newSlice
+// 	}
+// 	slice = slice[0:n]
+// 	copy(slice[m:n], data)
+// 	return slice
+// }
+
+// t := make([]byte, len(s), (cap(s)+1)*2)
+// copy(t, s)
+// s = t
